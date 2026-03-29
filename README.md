@@ -1,24 +1,40 @@
 ## Databricks Cert Prep
 
-App simples em Streamlit para praticar o quiz de `Databricks Certified Data Analyst Associate`.
+App em Streamlit para praticar o quiz de `Databricks Certified Data Analyst Associate`.
+
+Antes leia o docs/resumo-estudo.md
 
 ## Estrutura
 
 ```text
 .
-├── app.py
 ├── data/
-│   └── quiz-data-analyst-associate.md
+│   ├── quiz-data-analyst-associate.md
+│   └── quiz-advanced.md
 ├── docs/
 │   ├── databricks-certified-data-analyst-associate-oct-2025.pdf
 │   └── resumo-estudo.md
-├── main.py
+├── src/
+│   ├── app.py
+│   ├── database/
+│   │   └── repository.py
+│   ├── quiz/
+│   │   └── loader.py
+│   ├── schema/
+│   │   └── models.py
+│   ├── state/
+│   │   └── session.py
+│   └── ui/
+│       ├── navigation.py
+│       ├── question.py
+│       ├── results.py
+│       ├── sidebar.py
+│       └── styles.py
+├── Makefile
+├── Dockerfile
+├── docker-compose.yml
 ├── pyproject.toml
-├── requirements.txt
-└── src/
-    └── databrickscertprep/
-        ├── __init__.py
-        └── app.py
+└── requirements.txt
 ```
 
 ## Executar
@@ -26,26 +42,32 @@ App simples em Streamlit para praticar o quiz de `Databricks Certified Data Anal
 **Local:**
 
 ```bash
+make install
+make run
+```
+
+Ou manualmente:
+
+```bash
 pip install -r requirements.txt
-streamlit run app.py
+PYTHONPATH=src streamlit run src/app.py
 ```
 
 **Docker Compose:**
 
 ```bash
-docker-compose up
+make docker-up
 ```
 
 Acesse em [http://localhost:8501](http://localhost:8501).
 
-Para rodar em background:
-
 ```bash
-docker-compose up -d
-docker-compose down  # para encerrar
+make docker-down   # encerrar
+make docker-logs   # ver logs
+make docker-build  # rebuild da imagem
 ```
 
 ## Conteúdo
 
-- O quiz fica em `data/quiz-data-analyst-associate.md`.
+- Os quizzes ficam em `data/` (padrão e avançado).
 - Os materiais de apoio ficam em `docs/`.
