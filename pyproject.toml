@@ -1,0 +1,9 @@
+[project]
+name = "databricks-cert-prep"
+version = "0.1.0"
+description = "Simple Streamlit quiz app for Databricks Data Analyst Associate study"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit>=1.44,<2",
+]
