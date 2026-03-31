@@ -276,6 +276,232 @@ SELECT cliente_id, valor FROM pedidos QUALIFY ROW_NUMBER() OVER (PARTITION BY cl
 
 ---
 
+### Query Profile — Analisar performance com o DAG
+
+O **Query Profile** exibe a execução de uma query como um **DAG (Directed Acyclic Graph)** — um grafo onde cada nó é um operador e as arestas representam o fluxo de dados.
+
+> Acesse via: SQL Editor → resultado da query → aba **Query Profile**
+
+**O que o DAG mostra:**
+
+| Operador | O que significa |
+|---|---|
+| **Scan** | Leitura de dados de uma fonte (tabela, arquivo) |
+| **Filter** | Aplicação de condição WHERE — reduz linhas |
+| **Join** | Combinação de linhas de múltiplas fontes |
+| **Shuffle** | Redistribuição de dados entre executores — **operação cara** |
+| **Hash / Sort** | Agrupamento e agregação por chave |
+| **Union** | Concatenação de linhas com mesmo schema |
+
+**Métricas disponíveis por nó (clique no operador):**
+- **Time spent** — tempo de execução do operador
+- **Rows processed** — quantidade de linhas processadas/emitidas
+- **Memory peak** — pico de memória consumida
+
+**Como identificar gargalos:**
+1. Localize operadores com **alto tempo** ou **muitas linhas inesperadas**
+2. **Shuffle excessivo** → considere Liquid Clustering ou broadcast join
+3. **Scan com muitas linhas** → filtros não estão sendo aplicados no storage (revisar particionamento/clustering)
+4. **Join caro** → verificar se a ordem dos joins está otimizada
+
+> **Atenção:** Query Profile **não está disponível para resultados em cache**. Para forçar re-execução, modifique ou remova o `LIMIT` da query.
+
+Ref: [query-profile#explore-the-dag](https://docs.databricks.com/aws/en/sql/user/queries/query-profile#explore-the-dag)
+
+---
+
+### ANALYZE TABLE — Coletar estatísticas para o otimizador
+
+Coleta estatísticas estimadas de uma tabela para que o **query optimizer** gere planos de execução mais eficientes.
+
+> Para Unity Catalog managed tables, prefira habilitar **Predictive Optimization** — ele executa `ANALYZE` automaticamente.
+
+**Sintaxe:**
+```sql
+-- Tabela inteira (row count + size em bytes)
+ANALYZE TABLE tabela COMPUTE STATISTICS;
+
+-- Apenas tamanho em bytes (sem full scan — rápido)
+ANALYZE TABLE tabela COMPUTE STATISTICS NOSCAN;
+
+-- Estatísticas por coluna (min, max, nulls, distinct count, avg length)
+ANALYZE TABLE tabela COMPUTE STATISTICS FOR COLUMNS col1, col2;
+ANALYZE TABLE tabela COMPUTE STATISTICS FOR ALL COLUMNS;
+
+-- Estatísticas Delta (recomputa no Delta log — Runtime 14.3 LTS+)
+ANALYZE TABLE tabela COMPUTE DELTA STATISTICS;
+
+-- Todas as tabelas de um schema
+ANALYZE TABLES IN schema_name COMPUTE STATISTICS;
+```
+
+**O que cada opção coleta:**
+
+| Opção | Coleta | Custo |
+|---|---|---|
+| *(padrão)* | Row count + size em bytes | Full scan |
+| `NOSCAN` | Apenas size em bytes | Sem scan — muito rápido |
+| `FOR COLUMNS` | Min, max, nulls, distinct count, avg/max length | Full scan + extra |
+| `FOR ALL COLUMNS` | Igual acima para todas as colunas | Full scan + extra |
+| `COMPUTE DELTA STATISTICS` | Estatísticas no Delta log para data skipping | Incremental |
+
+> **Limitações:**
+> - `FOR COLUMNS` é incompatível com `PARTITION`
+> - `PARTITION` não é suportado em tabelas Delta
+> - Após definir novas colunas de estatísticas Delta, rode `COMPUTE DELTA STATISTICS` **e depois** `COMPUTE STATISTICS` em sequência
+
+**Quando usar:**
+- Antes de queries críticas após grandes modificações de dados
+- Quando o Query Profile mostrar planos de join ruins ou scans inesperadamente grandes
+- Ao adicionar novas colunas para Delta data skipping
+
+Ref: [sql-ref-syntax-aux-analyze-compute-statistics](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-aux-analyze-compute-statistics)
+
+---
+
+### WATERMARK — Controle de atraso em streaming
+
+Disponível a partir do **Databricks Runtime 12.0**. A cláusula `WATERMARK` define um **limiar de atraso** para dados que chegam fora de ordem em pipelines de streaming stateful (stream-stream joins, agregações por janela de tempo).
+
+**Sintaxe (dentro do FROM):**
+```sql
+FROM tabela
+  WATERMARK named_expression DELAY OF interval
+```
+
+**Exemplos:**
+```sql
+-- Usando coluna de timestamp já existente
+SELECT window(ts, '1 minute'), COUNT(*)
+FROM eventos
+  WATERMARK ts DELAY OF INTERVAL 10 SECONDS
+GROUP BY window(ts, '1 minute');
+
+-- Derivando timestamp a partir de coluna string
+SELECT window(event_time, '5 minutes'), SUM(valor)
+FROM vendas
+  WATERMARK to_timestamp(event_ts) DELAY OF INTERVAL 30 SECONDS
+GROUP BY window(event_time, '5 minutes');
+
+-- Stream-stream join com watermark nos dois lados
+SELECT a.id, b.descricao
+FROM pedidos
+    WATERMARK ts DELAY OF INTERVAL 1 MINUTES AS a
+JOIN pagamentos
+    WATERMARK ts DELAY OF INTERVAL 1 MINUTES AS b
+ON a.id = b.pedido_id;
+```
+
+**Parâmetros:**
+
+| Parâmetro | Regra |
+|---|---|
+| `named_expression` | Deve ser do tipo **timestamp** — referência a coluna existente ou transformação determinística (ex: `to_timestamp()`) |
+| `DELAY OF interval` | Valor positivo, **menor que 1 mês** — define a "janela de tolerância" para dados atrasados |
+
+**Como funciona:**
+- O watermark avança conforme o **maior timestamp visto** menos o `DELAY`
+- Dados que chegam com timestamp **anterior ao watermark atual** são descartados
+- Operações stateful (aggregation, join) só fecham a janela quando o watermark ultrapassa o limite da janela
+
+> **Trade-off delay alto vs baixo:**
+> | | Delay pequeno | Delay grande |
+> |---|---|---|
+> | Latência | Baixa | Alta |
+> | Tolerância a atraso | Pouca | Muita |
+> | Estado mantido em memória | Menos | Mais |
+
+> **Atenção na prova:** WATERMARK é obrigatório em **stream-stream joins** e **agregações por event time** em Streaming Tables. Sem watermark, o estado cresce indefinidamente.
+
+Ref: [sql-ref-syntax-qry-select-watermark](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-watermark)
+
+---
+
+### Funções JSON — Extrair e parsear dados semiestruturados
+
+#### `get_json_object` — extrair um campo por path
+
+```sql
+get_json_object(expr, path)
+```
+
+Extrai **um único valor** de uma string JSON via [JSONPath](https://goessner.net/articles/JsonPath/). Retorna `NULL` se o caminho não for encontrado.
+
+```sql
+SELECT get_json_object('{"user":{"name":"Ana","age":30}}', '$.user.name');
+-- Result: Ana
+
+SELECT get_json_object('{"itens":[1,2,3]}', '$.itens[0]');
+-- Result: 1
+```
+
+---
+
+#### `json_tuple` — extrair múltiplos campos de uma vez
+
+```sql
+json_tuple(jsonStr, path1 [, path2, ...])
+```
+
+Extrai **vários campos em paralelo** como colunas de uma linha. Retorna `NULL` para campos não encontrados. É uma **função geradora** (table-valued).
+
+```sql
+-- Runtime 12.2+ — invocar como referência de tabela (forma recomendada)
+SELECT j.*, 'extra'
+FROM json_tuple('{"a":1, "b":2}', 'a', 'b') AS j;
+-- Result: 1  2  extra
+
+-- Runtime ≤ 12.1 — deve ser a única generator na SELECT list
+SELECT json_tuple('{"a":1, "b":2}', 'a', 'b'), 'extra';
+```
+
+> **Runtime ≤ 12.1:** usar múltiplos generators na mesma query lança `UNSUPPORTED_GENERATOR.MULTI_GENERATOR`.
+> **Runtime ≥ 12.2:** uso via `LATERAL VIEW` ou `SELECT list` está depreciado — prefira como referência de tabela.
+
+---
+
+#### `from_json` — parsear JSON para struct tipado
+
+```sql
+from_json(jsonStr, schema [, options])
+```
+
+Converte uma string JSON em uma **struct** com schema definido, permitindo acessar campos com notação de ponto.
+
+```sql
+-- Schema inline
+SELECT from_json('{"a":1, "b":0.8}', 'a INT, b DOUBLE');
+-- Result: {a: 1, b: 0.8}
+
+-- Inferir schema automaticamente
+SELECT from_json(payload, schema_of_json('{"id":1,"nome":"Ana"}')) AS dados
+FROM eventos;
+
+-- Acessar campo da struct resultante
+SELECT from_json(payload, 'id INT, nome STRING').nome AS nome
+FROM eventos;
+
+-- Com opções de parsing
+SELECT from_json(payload, 'ts TIMESTAMP', MAP('timestampFormat', 'yyyy-MM-dd HH:mm:ss'))
+FROM logs;
+```
+
+> **Case-sensitive:** os nomes de campo no `schema` devem coincidir **exatamente** com os do JSON (maiúsculas/minúsculas incluídas).
+
+---
+
+**Trade-off entre as três funções:**
+
+| Função | Extrai | Retorno | Ideal para |
+|---|---|---|---|
+| `get_json_object` | 1 campo por chamada | STRING | Campos pontuais, paths aninhados |
+| `json_tuple` | N campos de uma vez | Colunas separadas (STRING) | Extrair vários campos sem struct |
+| `from_json` | JSON inteiro | STRUCT tipado | Parsear payload completo com tipos corretos |
+
+Refs: [get_json_object](https://docs.databricks.com/aws/en/sql/language-manual/functions/get_json_object) · [json_tuple](https://docs.databricks.com/aws/en/sql/language-manual/functions/json_tuple) · [from_json](https://docs.databricks.com/aws/en/sql/language-manual/functions/from_json)
+
+---
+
 ## 4. UNITY CATALOG — PERMISSÕES
 
 ### Hierarquia de privileges
@@ -380,6 +606,52 @@ OPTIMIZE minha_tabela ZORDER BY (coluna);  -- legado, prefira Liquid Clustering
 
 ---
 
+### CREATE TABLE CLONE — Copiar tabelas Delta
+
+Duplica uma tabela Delta (ou Parquet/Iceberg) para um destino, opcionalmente em uma versão específica.
+
+**Sintaxe:**
+```sql
+CREATE TABLE [IF NOT EXISTS] tabela_destino [SHALLOW | DEEP] CLONE tabela_origem
+  [TBLPROPERTIES (...)]
+  [LOCATION 'caminho'];
+
+[CREATE OR] REPLACE TABLE tabela_destino [SHALLOW | DEEP] CLONE tabela_origem;
+```
+
+**Deep Clone (padrão) vs Shallow Clone:**
+
+| | Deep Clone | Shallow Clone |
+|---|---|---|
+| Copia arquivos de dados? | **Sim** — cópia completa e independente | **Não** — referencia arquivos da origem |
+| Independência | Total (alterações não afetam a origem) | Dependente (arquivos da origem devem existir) |
+| Custo de storage | Alto | Baixo |
+| Ideal para | Migração, backup, ML reproducibility | Experimentos temporários, testes rápidos |
+
+```sql
+-- Deep clone (cópia completa)
+CREATE TABLE gold.backup.vendas DEEP CLONE gold.sales.vendas;
+
+-- Shallow clone (referencia arquivos da origem)
+CREATE TABLE sandbox.teste.vendas SHALLOW CLONE gold.sales.vendas;
+
+-- Clone de versão específica (time travel)
+CREATE TABLE gold.backup.vendas CLONE gold.sales.vendas VERSION AS OF 10;
+
+-- Substituir tabela existente
+CREATE OR REPLACE TABLE sandbox.teste.vendas SHALLOW CLONE gold.sales.vendas;
+```
+
+> **Casos de uso típicos na prova:**
+> - Ambiente de teste sem duplicar dados → **Shallow Clone**
+> - Backup antes de operação destrutiva → **Deep Clone**
+> - Reproduzir experimento de ML em versão específica → **Deep Clone + VERSION AS OF**
+> - Iceberg managed table → apenas **Deep Clone** suportado
+
+Ref: [delta-clone](https://docs.databricks.com/aws/en/sql/language-manual/delta-clone)
+
+---
+
 ### Aggregate Functions
 
 ```sql
@@ -468,6 +740,61 @@ FROM catalog.schema.clientes;
 
 ---
 
+### LATERAL VIEW — Explodir arrays e maps em linhas
+
+> **Depreciado desde Databricks Runtime 12.2** — prefira invocar funções geradoras diretamente como referência de tabela. Ainda cai na prova por ser amplamente usado em código legado.
+
+Aplica uma **função geradora** (como `EXPLODE`) a cada linha do resultado, criando uma tabela virtual com as linhas expandidas.
+
+**Sintaxe:**
+```sql
+LATERAL VIEW [ OUTER ] generator_function ( expression [, ...] )
+  [ table_alias ] AS column_alias [, ...]
+```
+
+**Exemplo — explodir array de tags:**
+```sql
+SELECT id, tag
+FROM produtos
+LATERAL VIEW EXPLODE(tags) t AS tag;
+```
+
+**Com OUTER — preservar linhas quando o array é nulo/vazio:**
+```sql
+-- Sem OUTER: produto sem tags não aparece no resultado
+-- Com OUTER: produto aparece com tag = NULL
+SELECT id, tag
+FROM produtos
+LATERAL VIEW OUTER EXPLODE(tags) t AS tag;
+```
+
+**Múltiplos LATERAL VIEW — produto cartesiano:**
+```sql
+SELECT nome, idade, num
+FROM pessoa
+LATERAL VIEW EXPLODE(ARRAY(30, 60)) tbl1 AS idade
+LATERAL VIEW EXPLODE(ARRAY(40, 80)) tbl2 AS num;
+-- 4 pessoas × 2 × 2 = 16 linhas
+```
+
+**Forma moderna equivalente (preferida no Runtime ≥ 12.2):**
+```sql
+-- Em vez de LATERAL VIEW EXPLODE(tags), use:
+SELECT id, tag
+FROM produtos, EXPLODE(tags) AS t(tag);
+```
+
+> **Trade-off LATERAL VIEW vs forma moderna:**
+> | | `LATERAL VIEW EXPLODE` | `EXPLODE` direto |
+> |---|---|---|
+> | Suporte | Legado (pré-12.2) | Recomendado (≥ 12.2) |
+> | OUTER (preservar nulls) | `LATERAL VIEW OUTER` | `EXPLODE_OUTER(col)` |
+> | Múltiplos arrays | Vários `LATERAL VIEW` | Vírgula entre referências |
+
+Ref: [sql-ref-syntax-qry-select-lateral-view](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-lateral-view)
+
+---
+
 ## 6. DATABRICKS ASSISTANT NO SQL EDITOR
 
 No SQL Editor, o fluxo principal é via **chat** (não slash commands). O `/optimize` é o principal slash command disponível.
@@ -518,6 +845,7 @@ Gold   → Dados agregados e modelados para consumo analítico
 - [ ] Streaming Table vs Materialized View: streaming = contínuo; MV = batch periódico
 - [ ] Dynamic View: mascaramento e row-level security em tempo real
 - [ ] `CREATE OR REPLACE TABLE` mantém privilégios e history (≠ DROP + CREATE)
+- [ ] CLONE: Deep = cópia completa independente; Shallow = referencia arquivos da origem (barato, dependente)
 
 **Permissões (questões frequentes)**
 - [ ] Least privilege: USE CATALOG + USE SCHEMA + SELECT (3 grants necessários)
@@ -530,3 +858,77 @@ Gold   → Dados agregados e modelados para consumo analítico
 - [ ] UNION (dedup) vs UNION ALL (com duplicatas)
 - [ ] TIME TRAVEL: `VERSION AS OF` e `TIMESTAMP AS OF`; VACUUM limita o histórico
 - [ ] APPROX_COUNT_DISTINCT para grandes volumes (mais rápido que COUNT DISTINCT)
+- [ ] Query Profile: Shuffle caro → clustering/broadcast; Scan com muitas linhas → revisar filtros; cache impede exibição do profile
+- [ ] ANALYZE TABLE: `NOSCAN` só coleta size (sem full scan); `FOR COLUMNS` adiciona min/max/nulls/distinct; Predictive Optimization substitui para managed tables
+- [ ] WATERMARK: obrigatório em stream-stream joins e agregações por event time; delay define tolerância a dados atrasados; sem watermark o estado cresce indefinidamente
+- [ ] JSON: `get_json_object` → 1 campo (STRING); `json_tuple` → N campos (STRING, generator); `from_json` → struct tipado com schema definido
+
+---
+
+## 9. REFERÊNCIAS DA DOCUMENTAÇÃO OFICIAL
+
+### Databricks Assistant / Genie Code
+| Tópico | Link |
+|---|---|
+| Slash commands em Notebooks | [notebooks/code-assistant](https://docs.databricks.com/aws/en/notebooks/code-assistant#cell-actions) |
+
+### SQL — Funções JSON
+| Tópico | Link |
+|---|---|
+| get_json_object | [functions/get_json_object](https://docs.databricks.com/aws/en/sql/language-manual/functions/get_json_object) |
+| json_tuple | [functions/json_tuple](https://docs.databricks.com/aws/en/sql/language-manual/functions/json_tuple) |
+| from_json | [functions/from_json](https://docs.databricks.com/aws/en/sql/language-manual/functions/from_json) |
+
+### SQL — Cláusulas e Sintaxe
+| Tópico | Link |
+|---|---|
+| QUALIFY | [sql-ref-syntax-qry-select-qualify](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-qualify) |
+| PIVOT | [sql-ref-syntax-qry-select-pivot](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-pivot) |
+| UNPIVOT | [sql-ref-syntax-qry-select-unpivot](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-unpivot) |
+| LATERAL VIEW | [sql-ref-syntax-qry-select-lateral-view](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-lateral-view) |
+| RANK (window function) | [functions/rank](https://docs.databricks.com/aws/en/sql/language-manual/functions/rank) |
+
+### Delta Lake
+| Tópico | Link |
+|---|---|
+| Time Travel (histórico de versões) | [delta/history](https://docs.databricks.com/aws/en/delta/history) |
+| VACUUM | [delta/vacuum](https://docs.databricks.com/aws/en/delta/vacuum) |
+| OPTIMIZE | [delta-optimize](https://docs.databricks.com/aws/en/sql/language-manual/delta-optimize) |
+| CLONE (Deep e Shallow) | [delta-clone](https://docs.databricks.com/aws/en/sql/language-manual/delta-clone) |
+| Liquid Clustering | [delta/clustering](https://docs.databricks.com/aws/en/delta/clustering) |
+| Streaming Tables | [delta/streaming-tables](https://docs.databricks.com/aws/en/delta/streaming-tables) |
+| WATERMARK (event time / late data) | [sql-ref-syntax-qry-select-watermark](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-watermark) |
+
+### Tabelas e Views
+| Tópico | Link |
+|---|---|
+| Managed vs External Tables | [tables/external](https://docs.databricks.com/aws/en/tables/external) |
+| Materialized Views | [ldp/dbsql/materialized](https://docs.databricks.com/aws/en/ldp/dbsql/materialized) |
+| Dynamic Views (row/column security) | [views/dynamic](https://docs.databricks.com/aws/en/views/dynamic) |
+
+### Unity Catalog
+| Tópico | Link |
+|---|---|
+| Privileges (hierarquia de permissões) | [manage-privileges/privileges](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges) |
+| Column Masks e Row Filters | [filters-and-masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/) |
+
+### Ingestão e Compartilhamento
+| Tópico | Link |
+|---|---|
+| Auto Loader | [ingestion/cloud-object-storage/auto-loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader/) |
+| COPY INTO | [ingestion/cloud-object-storage/copy-into](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/copy-into/) |
+| Delta Sharing | [delta-sharing](https://docs.databricks.com/aws/en/delta-sharing/) |
+
+### Performance e Orquestração
+| Tópico | Link |
+|---|---|
+| Photon Engine | [compute/photon](https://docs.databricks.com/aws/en/compute/photon) |
+| Query Profile (DAG) | [query-profile#explore-the-dag](https://docs.databricks.com/aws/en/sql/user/queries/query-profile#explore-the-dag) |
+| ANALYZE TABLE (estatísticas do otimizador) | [sql-ref-syntax-aux-analyze-compute-statistics](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-aux-analyze-compute-statistics) |
+| Lakeflow Jobs (Workflows) | [jobs](https://docs.databricks.com/aws/en/jobs/) |
+| SQL Alerts | [sql/user/alerts](https://docs.databricks.com/aws/en/sql/user/alerts/) |
+
+### Arquitetura
+| Tópico | Link |
+|---|---|
+| Medallion Architecture | [lakehouse/medallion](https://docs.databricks.com/aws/en/lakehouse/medallion) |
