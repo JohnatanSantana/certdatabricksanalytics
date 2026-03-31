@@ -96,3 +96,24 @@ def load_section_stats(session_id: int) -> list[dict]:
             (session_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def load_session_answers(session_id: int) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT question_number, section, chosen, correct_answer, is_correct"
+            " FROM answers WHERE session_id=?"
+            " ORDER BY question_number",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def load_session(session_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, started_at, finished_at, score, total, pct"
+            " FROM sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row else None

@@ -6,6 +6,7 @@ import database.repository as db
 from quiz.loader import load_quiz
 from schema.models import QUIZ_FILES
 from state.session import init_state
+from ui.history import render_history_detail
 from ui.navigation import render_navigation
 from ui.question import render_question
 from ui.results import render_results
@@ -46,15 +47,17 @@ def main() -> None:
     init_state(len(questions))
     render_sidebar(questions)
 
-    if not st.session_state["show_results"]:
+    if st.session_state["show_history"]:
+        render_history_detail(questions)
+    elif st.session_state["show_results"]:
+        render_results(questions)
+    else:
         difficulty = "Advanced" if "Advanced" in selected_quiz else "Standard"
         st.title(f"Practice Quiz — Databricks Data Analyst Associate · {difficulty}")
         current_index = st.session_state["current_question"]
         render_question(questions[current_index], current_index, len(questions))
         st.divider()
         render_navigation(len(questions))
-    else:
-        render_results(questions)
 
 
 if __name__ == "__main__":

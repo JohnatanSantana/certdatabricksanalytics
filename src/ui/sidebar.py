@@ -84,4 +84,11 @@ def render_sidebar(questions: list[Question]) -> None:
         else:
             for s in sessions:
                 date = s["finished_at"][:10]
-                st.caption(f"{date} — {s['score']}/{s['total']} ({s['pct']}%)")
+                badge = "🟢" if s["pct"] >= 70 else "🔴"
+                label = f"{badge} {date} · {s['score']}/{s['total']} ({s['pct']}%)"
+                if st.button(label, key=f"hist_{s['id']}", use_container_width=True):
+                    st.session_state["show_history"] = True
+                    st.session_state["history_session_id"] = s["id"]
+                    st.session_state["show_results"] = False
+                    st.session_state["needs_scroll"] = True
+                    st.rerun()

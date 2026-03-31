@@ -13,6 +13,8 @@ def init_state(total_questions: int) -> None:
     st.session_state.setdefault("session_saved", False)
     st.session_state.setdefault("session_id", None)
     st.session_state.setdefault("needs_scroll", False)
+    st.session_state.setdefault("show_history", False)
+    st.session_state.setdefault("history_session_id", None)
     st.session_state.setdefault(
         "started_at", datetime.now().isoformat(timespec="seconds")
     )
@@ -28,6 +30,8 @@ def reset_quiz(total_questions: int) -> None:
     st.session_state["session_saved"] = False
     st.session_state["session_id"] = None
     st.session_state["needs_scroll"] = False
+    st.session_state["show_history"] = False
+    st.session_state["history_session_id"] = None
     st.session_state["started_at"] = datetime.now().isoformat(timespec="seconds")
     for index in range(total_questions):
         st.session_state[f"choice_{index}"] = None
