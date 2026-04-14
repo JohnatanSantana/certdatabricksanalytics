@@ -1,14 +1,19 @@
 FROM python:3.12-slim
 
-# Prevent .pyc files and enable stdout/stderr unbuffered
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    UV_SYSTEM_PYTHON=1 \
+    UV_NO_CACHE=1
 
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Install dependencies (layer cached separately from source)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
 # Copy application source and quiz data files
 COPY src/ ./src/

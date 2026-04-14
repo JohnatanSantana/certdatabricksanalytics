@@ -1,15 +1,16 @@
-.PHONY: install run docker-build docker-up docker-down docker-logs clean
+.PHONY: install run lock docker-build docker-up docker-down docker-logs clean
 
-PYTHON    := python3
-PIP       := $(PYTHON) -m pip
-STREAMLIT := $(PYTHON) -m streamlit
-ENTRY     := src/app.py
+UV    := uv
+ENTRY := src/app.py
 
 install:
-	$(PIP) install -r requirements.txt
+	$(UV) sync
 
 run:
-	PYTHONPATH=src $(STREAMLIT) run $(ENTRY)
+	PYTHONPATH=src $(UV) run streamlit run $(ENTRY)
+
+lock:
+	$(UV) lock
 
 docker-build:
 	docker compose build
