@@ -254,6 +254,69 @@ SELECT cliente_id, valor FROM pedidos QUALIFY ROW_NUMBER() OVER (PARTITION BY cl
 
 ---
 
+### SQL Alert — Estados e Mensagens de Notificação
+
+#### Estados do alerta
+
+| Estado | Quando ocorre |
+|---|---|
+| **`TRIGGERED`** | Última execução: coluna avaliada **satisfez** a condição + threshold configurados |
+| **`OK`** | Última execução: condição **não** foi satisfeita (valor voltou ao normal) |
+| **`ERROR`** | Ocorreu um erro durante a avaliação do alerta |
+
+> A versão atual **não possui** o estado `UNKNOWN` (existia em versões legadas).
+
+#### Quando a notificação é disparada
+
+- **Padrão:** apenas quando o estado muda para `TRIGGERED`
+- **Opção "Notify when OK":** envia notificação também quando o estado volta para `OK`
+- **Opção "Notify periodically":** reenvio periódico enquanto permanecer `TRIGGERED` (útil para alertas críticos que precisam de ação)
+
+#### Tipos de condição
+
+| Operador | Exemplo |
+|---|---|
+| `>` maior que | vendas > 10000 |
+| `>=` maior ou igual | erros >= 5 |
+| `<` menor que | estoque < 50 |
+| `<=` menor ou igual | uptime <= 0.99 |
+| `=` igual a | status = 0 |
+| `!=` diferente de | status != 'ok' |
+
+Agregações suportadas no valor avaliado: `SUM`, `AVERAGE`, ou o valor da primeira linha/coluna.
+
+> **Queries com parâmetros não são suportadas** em SQL Alerts.
+
+#### Template de mensagem personalizada
+
+As notificações aceitam **variáveis de template** entre `{{ }}`:
+
+| Variável | Conteúdo |
+|---|---|
+| `{{ALERT_NAME}}` | Nome do alerta |
+| `{{ALERT_STATUS}}` | Estado atual: `TRIGGERED`, `OK` ou `ERROR` |
+| `{{ALERT_CONDITION}}` | Operador da condição configurada |
+| `{{ALERT_THRESHOLD}}` | Valor do threshold configurado |
+| `{{ALERT_COLUMN}}` | Coluna avaliada |
+| `{{ALERT_URL}}` | Link direto para o alerta no workspace |
+| `{{QUERY_RESULT_VALUE}}` | Valor encontrado na última execução |
+| `{{QUERY_RESULT_ROWS}}` | Número de linhas retornadas |
+| `{{QUERY_RESULT_COLS}}` | Número de colunas retornadas |
+| `{{QUERY_RESULT_TABLE}}` | Primeiras 100 linhas em formato HTML (só e-mail) |
+
+**Exemplo de mensagem:**
+```
+Alerta: {{ALERT_NAME}} está {{ALERT_STATUS}}
+Valor atual: {{QUERY_RESULT_VALUE}} (threshold: {{ALERT_CONDITION}} {{ALERT_THRESHOLD}})
+Ver detalhes: {{ALERT_URL}}
+```
+
+> Formatação **HTML** é suportada apenas para destinos do tipo **e-mail**.
+
+Ref: [sql/user/alerts](https://docs.databricks.com/aws/en/sql/user/alerts/)
+
+---
+
 ### Auto Loader vs COPY INTO vs Delta Sharing
 
 | | Auto Loader | COPY INTO | Delta Sharing |
@@ -549,6 +612,118 @@ RETURN CASE WHEN is_member('compliance_team') THEN cpf ELSE '***.***.***-**' END
 
 ALTER TABLE catalog.schema.clientes ALTER COLUMN cpf SET MASK catalog.schema.mask_cpf;
 ```
+
+---
+
+### Tags no Unity Catalog
+
+Tags são pares **chave = valor** (valor opcional) aplicados a objetos do Unity Catalog para organização, descoberta e governança de dados.
+
+**Objetos suportados:** catálogo, schema, tabela, coluna, view, volume, modelo registrado, dashboard, Genie space.
+
+#### Tipos de tag
+
+| Tipo | Ícone | Quem define | Quem pode atribuir |
+|---|---|---|---|
+| **Tag livre** | — | Qualquer usuário | Quem tem `APPLY TAG` no objeto |
+| **Governed Tag** | 🔒 | Admin de conta | Quem tem `ASSIGN` na tag + `APPLY TAG` no objeto |
+| **System Tag** | 🔧 | Databricks (pré-definida) | Controlado por permissões da governed tag |
+
+#### Aplicar e remover tags via SQL
+
+**Runtime ≥ 16.1 — sintaxe `SET TAG` (recomendada):**
+```sql
+-- Tabela
+SET TAG ON TABLE catalog.schema.vendas custo_centro = financeiro;
+
+-- Coluna (PII sem valor)
+SET TAG ON COLUMN catalog.schema.clientes.cpf pii;
+
+-- Schema e catálogo
+SET TAG ON SCHEMA catalog.schema dominio = finance;
+SET TAG ON CATALOG catalog env = producao;
+
+-- Remover
+UNSET TAG ON TABLE catalog.schema.vendas custo_centro;
+UNSET TAG ON COLUMN catalog.schema.clientes.cpf pii;
+```
+
+**Runtime 13.3–16.0 — sintaxe `ALTER ... SET TAGS`:**
+```sql
+-- Tabela (múltiplas tags de uma vez)
+ALTER TABLE catalog.schema.vendas
+  SET TAGS ('custo_centro' = 'financeiro', 'env' = 'producao');
+
+ALTER TABLE catalog.schema.vendas
+  UNSET TAGS ('custo_centro', 'env');
+
+-- Coluna
+ALTER TABLE catalog.schema.clientes
+  ALTER COLUMN cpf SET TAGS ('pii' = 'true');
+
+ALTER TABLE catalog.schema.clientes
+  ALTER COLUMN cpf UNSET TAGS ('pii');
+```
+
+**Permissão necessária:** `APPLY TAG` no objeto + `USE SCHEMA` + `USE CATALOG`. Para governed tags, também `ASSIGN` na tag.
+
+#### Restrições importantes
+
+| Limite | Valor |
+|---|---|
+| Tags por objeto | Máximo **50** |
+| Tags por tabela (colunas) | Máximo **1.000** |
+| Tamanho da chave | Máximo **255** caracteres |
+| Tamanho do valor | Máximo **1.000** caracteres |
+| Caracteres proibidos na chave | `. , - = / :` |
+| Busca | Apenas correspondência **exata** |
+| Tags em múltiplas colunas | **Uma por comando** |
+
+> **Herança de tags:** tags aplicadas a catálogos propagam para schemas e tabelas **somente** em avaliações de política ABAC — não aparecem como tags diretas dos objetos filhos.
+
+> **Atenção ao dropar coluna com governed tag:** execute `UNSET TAG` antes de dropar a coluna para evitar vazamento de dados.
+
+#### Tag `system:certified`
+
+A tag `system:certified` é uma **System Tag** predefinida pelo Databricks para identificar datasets confiáveis e validados pela organização.
+
+```sql
+-- Marcar tabela como certificada
+SET TAG ON TABLE catalog.schema.vendas `system:certified`;
+
+-- Alternativa (Runtime 13.3+)
+ALTER TABLE catalog.schema.vendas SET TAGS ('system:certified' = '');
+```
+
+- Exibida com ícone de medalha no **Catalog Explorer**
+- Aparece em destaque nas buscas do workspace
+- Apenas usuários com permissão `ASSIGN` na governed tag `system:certified` podem atribuí-la
+
+#### Pesquisar objetos por tag
+
+**Via Catalog Explorer (UI):**
+- Barra de busca do workspace → digitar `tag:chave` ou `tag:chave=valor`
+- A busca requer correspondência **exata**
+
+**Via SQL — `INFORMATION_SCHEMA`:**
+```sql
+-- Tags de tabelas no catalog atual
+SELECT table_catalog, table_schema, table_name, tag_name, tag_value
+FROM information_schema.table_tags
+WHERE tag_name = 'system:certified';
+
+-- Tags de colunas
+SELECT table_name, column_name, tag_name, tag_value
+FROM information_schema.column_tags
+WHERE tag_name = 'pii';
+
+-- Outros views disponíveis:
+-- information_schema.catalog_tags
+-- information_schema.schema_tags
+-- information_schema.volume_tags
+```
+
+> **Dica de prova:** para encontrar **todos os datasets certificados** de um catalog, use `information_schema.table_tags WHERE tag_name = 'system:certified'`. Para busca cross-catalog, use as system tables de account (`system.information_schema`).
 
 ---
 
@@ -862,6 +1037,9 @@ Gold   → Dados agregados e modelados para consumo analítico
 - [ ] ANALYZE TABLE: `NOSCAN` só coleta size (sem full scan); `FOR COLUMNS` adiciona min/max/nulls/distinct; Predictive Optimization substitui para managed tables
 - [ ] WATERMARK: obrigatório em stream-stream joins e agregações por event time; delay define tolerância a dados atrasados; sem watermark o estado cresce indefinidamente
 - [ ] JSON: `get_json_object` → 1 campo (STRING); `json_tuple` → N campos (STRING, generator); `from_json` → struct tipado com schema definido
+- [ ] SQL Alert: estados TRIGGERED / OK / ERROR (sem UNKNOWN); `{{ALERT_STATUS}}` e `{{QUERY_RESULT_VALUE}}` nas mensagens; queries com parâmetros não suportadas
+- [ ] Tags Unity Catalog: `APPLY TAG` p/ atribuir; `system:certified` = System Tag predefinida pelo Databricks; busca via `information_schema.table_tags`; busca exata apenas
+- [ ] Governed Tag exige `ASSIGN` + `APPLY TAG`; máx 50 tags/objeto; chave não pode ter `. , - = / :`
 
 ---
 
@@ -911,6 +1089,8 @@ Gold   → Dados agregados e modelados para consumo analítico
 |---|---|
 | Privileges (hierarquia de permissões) | [manage-privileges/privileges](https://docs.databricks.com/aws/en/data-governance/unity-catalog/manage-privileges/privileges) |
 | Column Masks e Row Filters | [filters-and-masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/) |
+| Tags (aplicar, buscar, governed, system) | [unity-catalog/tags](https://docs.databricks.com/aws/en/data-governance/unity-catalog/tags) |
+| SET TAG / UNSET TAG (Runtime ≥ 16.1) | [sql-ref-syntax-ddl-set-tag](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-ddl-set-tag) |
 
 ### Ingestão e Compartilhamento
 | Tópico | Link |
